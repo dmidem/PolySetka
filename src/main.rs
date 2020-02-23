@@ -2,6 +2,10 @@
 // https://docs.rs/byteorder/1.1.0/byteorder/trait.ReadBytesExt.html
 // https://doc.rust-lang.org/std/primitive.f32.html#method.from_le_bytes
 
+mod utils;
+
+use utils::{ensure_empty, ensure_empty_iter, next_word_or_err, trim_line_endings};
+
 // use std::net::{TcpStream};
 use std::fs::File;
 // use std::io::prelude::*;
@@ -9,8 +13,8 @@ use std::io::Read;
 use std::io::{BufRead, BufReader};
 // use std::str::from_utf8;
 // use std::rc::Rc;
-use std::borrow::Cow;
-
+// use std::borrow::Cow;
+// use std::str::SplitAsciiWhitespace;
 // let cube = r#"ply"#;
 
 enum FormatType {
@@ -98,61 +102,49 @@ struct Header {
 }
 
 fn parse_format_line(line: &str) -> Result<Format, String> {
-    let mut iter = line.split_whitespace();
-    let format_type = iter
-        .next()
-        .ok_or("format type not specified".to_string())
-        .and_then(|format_type_str| match format_type_str {
-            "ASCII" => Ok(FormatType::ASCII),
-            "binary_little_endian" => Ok(FormatType::BinaryLittleEndian),
-            "binary_big_endian" => Ok(FormatType::BinaryBigEndian),
-            _ => Err(format!(
-                "invalid format type specified: {}",
-                format_type_str
-            )),
+    let mut iter = line.split_ascii_whitespace();
+    let format_type =
+        next_word_or_err(&mut iter, "format type not specified").and_then(|format_type_str| {
+            match format_type_str {
+                "ascii" => Ok(FormatType::ASCII),
+                "binary_little_endian" => Ok(FormatType::BinaryLittleEndian),
+                "binary_big_endian" => Ok(FormatType::BinaryBigEndian),
+                _ => Err(format!(
+                    "invalid format type specified: {}",
+                    format_type_str
+                )),
+            }
         })?;
-
-    let version = iter
-        .next()
-        .ok_or("format type not specified".to_string())
-        .and_then(|version_str| match version_str {
-            "1.0" => Ok(version_str),
-            _ => Err(format!(
-                "invalid or unsupported format version: {}",
-                version_str
-            )),
+    let version =
+        next_word_or_err(&mut iter, "format version not specified").and_then(|version_str| {
+            match version_str {
+                "1.0" => Ok(version_str),
+                _ => Err(format!(
+                    "invalid or unsupported format version: {}",
+                    version_str
+                )),
+            }
         })?;
-
-    iter.next().map_or(Ok(()), |extra_str| {
-        Err(format!("extra data in format line: {}", extra_str))
-    })?;
-
+    ensure_empty_iter(&mut iter, "format")?;
     Ok((format_type, version.to_string()))
 }
 
 fn parse_comment_line(comment_line: &str) -> Result<Comment, String> {
-    Ok(comment_line.to_string())
+    Ok(trim_line_endings(comment_line).to_string())
 }
 
 fn parse_element_line(line: &str) -> Result<Element, String> {
-    let mut iter = line.split_whitespace();
-    let name = iter
-        .next()
-        .ok_or("element name not specified".to_string())?;
+    let mut iter = line.split_ascii_whitespace();
+    let name = next_word_or_err(&mut iter, "element name not specified")?;
 
-    let count: u64 = iter
-        .next()
-        .ok_or("element count not specified".to_string())
-        .and_then(|count_str| {
+    let count: u64 =
+        next_word_or_err(&mut iter, "element count not specified").and_then(|count_str| {
             count_str
                 .parse::<u64>()
                 .map_err(|_| "invalid element count (unsigned integer expected)".to_string())
         })?;
 
-    iter.next().map_or(Ok(()), |extra_str| {
-        Err(format!("extra data in element line: {}", extra_str))
-    })?;
-
+    ensure_empty_iter(&mut iter, "element")?;
     Ok(Element {
         name: name.to_string(),
         count,
@@ -172,6 +164,7 @@ enum HeaderKey<'a> {
 */
 
 enum HeaderKey {
+    None,
     Start,
     Format,
     Comment,
@@ -180,7 +173,7 @@ enum HeaderKey {
     End,
 }
 
-type HeaderLine<'a> = (HeaderKey, &'a str);
+type HeaderLine<'a> = (HeaderKey, &'a str, &'a str);
 
 struct HeaderReader<Stream: Read> {
     reader: BufReader<Stream>,
@@ -196,16 +189,36 @@ impl<Stream: Read> HeaderReader<Stream> {
             line_count: 0,
         }
     }
-
+    /*
     fn trim_line_endings<'a>(line: &'a String) -> &'a str {
         let line_ending_chars: &'static [_] = &['\n', '\r'];
         line.trim_end_matches(line_ending_chars)
     }
+    */
+    /*
+    // FIXME: use standard strip_suffix when it'll be apporved
+    fn strip_suffix(s: &str, suffix: char) -> Option<&str> {
+        if s.ends_with(suffix) {
+            Some(&s[0..s.len() - 1])
+        } else {
+            None
+        }
+    }
+
+    // fn trim_line_endings<'a>(line: &'a String) -> &'a str {
+    #[cfg(_NO_)]
+    fn trim_line_ending(line: &str) -> &str {
+        Self::strip_suffix(line, '\n').map_or(line, |s| Self::strip_suffix(s, '\r').unwrap_or(s))
+    }
+    */
     // fn parse_header_line<'a>(line: &'a str) -> Result<HeaderKey, String> {
-    fn parse_header_line<'a>(line: &'a str) -> Result<HeaderLine<'a>, String> {
-        let (keyword, value) = match line.find(' ') {
-            Some(i) => (&line[0..i], &line[i + 1..]),
-            None => (line, ""),
+    // fn parse_header_line<'a>(line: &'a str) -> Result<HeaderLine<'a>, String> {
+    fn parse_header_line(line: &str) -> Result<HeaderLine, String> {
+        // match line.find(' ') {
+        let (keyword, value) = {
+            let mut it = line.splitn(2, |c: char| -> bool { c.is_ascii_whitespace() });
+            // Rust guarantees left-to-right evaluation order
+            (it.next().unwrap(), it.next().unwrap_or(""))
         };
 
         match keyword {
@@ -217,21 +230,65 @@ impl<Stream: Read> HeaderReader<Stream> {
             "end_header" => Ok(HeaderKey::End),
             _ => Err(format!("invalid keyword in header: {}", keyword)),
         }
-        .map(|key| (key, value))
+        .map(|key| (key, keyword, value))
     }
 
+    // Result<Option<HeaderLine>, String> {
     pub fn read_line(&mut self) -> Result<HeaderLine, String> {
         self.line_string.clear();
         match self.reader.read_line(&mut self.line_string) {
+            Ok(0) => Err("broken header".to_string()), // Ok(None),
             Ok(_) => {
-                self.line_count = self.line_count + 1;
-                Self::parse_header_line(Self::trim_line_endings(&self.line_string))
+                self.line_count += 1;
+                Self::parse_header_line(&self.line_string)
+                // Self::parse_header_line(Self::trim_line_ending(&self.line_string))
+                // Some(Self::parse_header_line(&self.line_string)).transpose()
+                // Self::parse_header_line(&self.line_string)
             }
             Err(e) => Err(e.to_string()),
         }
         .map_err(|e| format!("line {}: {}", self.line_count, e))
     }
 }
+
+/*
+pub struct Lines<'a, B> {
+    buf: B,
+    str: String,
+    c: &'a str,
+}
+
+impl<'a, B: BufRead> Iterator for Lines<'a, B> {
+    type Item = Result<&'a str, String>;
+
+    fn next(&mut self) -> Option<Result<&'a str, String>> {
+        // let mut buf = String::new();
+        match self.buf.read_line(&mut self.str) {
+            Ok(0) => None,
+            Ok(_n) => {
+                if self.str.ends_with("\n") {
+                    self.str.pop();
+                    if self.str.ends_with("\r") {
+                        self.str.pop();
+                    }
+                }
+                self.c = self.str.as_ref();
+                Some(Ok(self.c))
+            }
+            Err(e) => Some(Err(e.to_string())),
+        }
+    }
+}
+*/
+
+/*
+impl<'a, Stream: Read> Iterator for HeaderReader<'a, Stream> {
+    type Item = Result<HeaderLine<'a>, String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.read_line())
+    }
+}
+*/
 
 /*
 fn trim_line_endings<'a>(line: &'a String) -> &'a str {
@@ -262,6 +319,16 @@ fn read_header_line<'a, Reader: BufRead>(
 
 // fn parse_header
 
+/*
+fn ensure_header_key<RequiredKey>(header_key: HeaderKey) -> Result<(), String> {
+    match header_key {
+        RequiredKey => Ok(()),
+        _ => Err("unexpected header key".to_string()), // FIXME
+    }
+}
+*/
+
+/*
 fn ensure_empty(value: &str, error_message: &str) -> Result<(), String> {
     if value.trim_start().is_empty() {
         Ok(())
@@ -269,63 +336,84 @@ fn ensure_empty(value: &str, error_message: &str) -> Result<(), String> {
         Err(error_message.to_string())
     }
 }
+*/
 
 fn parse_ply<Stream: Read>(stream: Stream) -> Result<(), String> {
     let mut header_reader = HeaderReader::new(stream);
 
+    let mut format: Option<Format>;
+    let mut comments = Vec::<Comment>::new();
+    let mut elements = Vec::<Element>::new();
+    /*
     header_reader
         .read_line()
         .and_then(|(key, value)| match key {
-            HeaderKey::Start => ensure_empty(value, "extra characters in start line"),
-            _ => Err("start expected".to_string()),
+            HeaderKey::Start => ensure_empty(value, "extra characters after \"ply\" keyword"),
+            _ => Err("\"ply\" keyword expected".to_string()),
         })?;
 
     let format = header_reader
         .read_line()
         .and_then(|(key, value)| match key {
             HeaderKey::Format => parse_format_line(value),
-            _ => Err("format expected".to_string()),
+            _ => Err("\"format\" keyword expected".to_string()),
         })?;
 
-    let mut comments = Vec::<Comment>::new();
-    let mut elements = Vec::<Element>::new();
     /*
     let n = (0..)
         .map(|_| header_reader.read_line()?)
         .map(|Ok((HeaderKey::Comment, value))| {
             parse_comment_line(value).and_then(|comment| Ok(comments.push(comment)))
         });
-        */
+    */
 
     let n = loop {
         // let (key, value): HeaderLine = header_reader.read_line()?;
         match header_reader.read_line()? {
-            (HeaderKey::Comment, value) => {
-                parse_comment_line(value).and_then(|comment| Ok(comments.push(comment)))?
-            }
+            (HeaderKey::Comment, value) => comments.push(parse_comment_line(value)?),
 
             (key, value) => break (key, value),
         }
     };
+    */
+
+    let mut prev_header_key = HeaderKey::None;
 
     loop {
-        // let (key, value): HeaderLine = header_reader.read_line()?;
-        match header_reader.read_line()? {
-            (HeaderKey::Comment, value) => {
-                parse_comment_line(value).and_then(|comment| Ok(comments.push(comment)))?
+        let (key, keyword, value): HeaderLine = header_reader.read_line()?;
+        println!("keyword: {}", keyword);
+        match key {
+            // https://stackoverflow.com/questions/31123882/how-to-map-a-parametrized-enum-from-a-generic-type-to-another
+            HeaderKey::Start => {
+                match prev_header_key {
+                    HeaderKey::None => Ok(()),
+                    _ => Err("\"ply\" keyword expected".to_string()),
+                }?;
+                ensure_empty(value, "ply")?
             }
 
-            (HeaderKey::Element, value) => {
-                parse_element_line(value).and_then(|element| Ok(elements.push(element)))?
+            HeaderKey::Format => {
+                match prev_header_key {
+                    HeaderKey::Start => Ok(()),
+                    _ => Err("\"format\" keyword expected".to_string()),
+                }?;
+                format = Some(parse_format_line(value)?)
             }
 
-            (HeaderKey::End, value) => {
-                ensure_empty(value, "extra characters in end line")?;
+            HeaderKey::Comment => comments.push(parse_comment_line(value)?),
+            HeaderKey::Element => elements.push(parse_element_line(value)?),
+            // HeaderKey::Property => parse_property_line(value)?,
+            HeaderKey::End => {
+                ensure_empty(value, "end_header")?;
                 break;
             }
-
-            _ => Err("comment, element or end expected".to_string())?,
+            _ => {
+                return Err(
+                    "\"comment\", \"element\" or \"end_header\" keywords expected".to_string(),
+                )
+            }
         }
+        prev_header_key = key
     }
 
     /*
